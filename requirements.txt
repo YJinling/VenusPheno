@@ -1,5 +1,8 @@
+torch
 numpy
 pandas
-torch
 scikit-learn
 h5py
+matplotlib
+networkx
+seaborn

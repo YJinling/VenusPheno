@@ -1,0 +1,15 @@
+group	task
+1	motility
+1	metabolism__aerobic
+1	carb_sucrose
+2	sporulation
+2	gram_stain
+2	metabolism__facultative
+2	carb_glycerol
+2	carb_lactose
+2	carb_maltose
+3	cell_shape__bacillus
+3	cell_shape__coccus
+3	metabolism__anaerobic
+3	carb_citrate
+3	carb_glucose

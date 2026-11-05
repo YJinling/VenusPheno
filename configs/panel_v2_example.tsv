@@ -1,0 +1,15 @@
+no	task	metadata	train_txt	val_txt	test_txt
+1	motility	data/metadata/motility.csv	data/splits/motility_train.txt	data/splits/motility_val.txt	data/splits/motility_test.txt
+2	sporulation	data/metadata/sporulation.csv	data/splits/sporulation_train.txt	data/splits/sporulation_val.txt	data/splits/sporulation_test.txt
+3	gram_stain	data/metadata/gram_stain.csv	data/splits/gram_stain_train.txt	data/splits/gram_stain_val.txt	data/splits/gram_stain_test.txt
+4	cell_shape__bacillus	data/metadata/cell_shape__bacillus.csv	data/splits/cell_shape__bacillus_train.txt	data/splits/cell_shape__bacillus_val.txt	data/splits/cell_shape__bacillus_test.txt
+5	cell_shape__coccus	data/metadata/cell_shape__coccus.csv	data/splits/cell_shape__coccus_train.txt	data/splits/cell_shape__coccus_val.txt	data/splits/cell_shape__coccus_test.txt
+6	metabolism__aerobic	data/metadata/metabolism__aerobic.csv	data/splits/metabolism__aerobic_train.txt	data/splits/metabolism__aerobic_val.txt	data/splits/metabolism__aerobic_test.txt
+7	metabolism__anaerobic	data/metadata/metabolism__anaerobic.csv	data/splits/metabolism__anaerobic_train.txt	data/splits/metabolism__anaerobic_val.txt	data/splits/metabolism__anaerobic_test.txt
+8	metabolism__facultative	data/metadata/metabolism__facultative.csv	data/splits/metabolism__facultative_train.txt	data/splits/metabolism__facultative_val.txt	data/splits/metabolism__facultative_test.txt
+9	carb_citrate	data/metadata/carb_citrate.csv	data/splits/carb_citrate_train.txt	data/splits/carb_citrate_val.txt	data/splits/carb_citrate_test.txt
+10	carb_glucose	data/metadata/carb_glucose.csv	data/splits/carb_glucose_train.txt	data/splits/carb_glucose_val.txt	data/splits/carb_glucose_test.txt
+11	carb_glycerol	data/metadata/carb_glycerol.csv	data/splits/carb_glycerol_train.txt	data/splits/carb_glycerol_val.txt	data/splits/carb_glycerol_test.txt
+12	carb_lactose	data/metadata/carb_lactose.csv	data/splits/carb_lactose_train.txt	data/splits/carb_lactose_val.txt	data/splits/carb_lactose_test.txt
+13	carb_maltose	data/metadata/carb_maltose.csv	data/splits/carb_maltose_train.txt	data/splits/carb_maltose_val.txt	data/splits/carb_maltose_test.txt
+14	carb_sucrose	data/metadata/carb_sucrose.csv	data/splits/carb_sucrose_train.txt	data/splits/carb_sucrose_val.txt	data/splits/carb_sucrose_test.txt

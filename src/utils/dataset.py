@@ -109,7 +109,6 @@ import h5py
 class GenomeEmbeddingMultiTaskDataset(Dataset):
 
     def __init__(self, df, task_list):
-
         self.task_list = task_list
         self.task2idx = {t: i for i, t in enumerate(task_list)}
         T = len(task_list)
@@ -121,7 +120,6 @@ class GenomeEmbeddingMultiTaskDataset(Dataset):
         self.mask_list = []
 
         for genome_id, sub_df in grouped:
-
             h5_path = sub_df["h5_path"].iloc[0]
 
             y = torch.zeros(T, dtype=torch.float32)
@@ -143,13 +141,12 @@ class GenomeEmbeddingMultiTaskDataset(Dataset):
         return len(self.h5_paths)
 
     def __getitem__(self, idx):
-
         h5_path = self.h5_paths[idx]
 
         with h5py.File(h5_path, "r") as f:
             emb = torch.from_numpy(f["embedding"][:]).float()
 
-        return emb, None, self.y_list[idx], self.mask_list[idx]
+        return emb, self.y_list[idx], self.mask_list[idx]
 
 
 
@@ -199,7 +196,7 @@ def collate_fn_multitask(batch):
     task_mask = torch.stack(batch_task_mask, dim=0) # (B, T)
 
     return x, inst_mask, y, task_mask, gene_ids
- 
+
 
 def get_cv_splits_from_group_PF(meta_csv):
     """

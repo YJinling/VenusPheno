@@ -7,8 +7,6 @@ from sklearn.metrics import (
     matthews_corrcoef,
     balanced_accuracy_score
 )
-
-
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
 
@@ -102,5 +100,3 @@ def compute_metrics(y_true, y_pred, num_classes=2):
         }
 
         return metrics
-
-

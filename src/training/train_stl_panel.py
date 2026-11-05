@@ -1,23 +1,19 @@
 import numpy as np
 import json
 import argparse
+import gc
 import os, time, torch
 import pandas as pd
 import sys
-from pathlib import Path
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from sklearn.model_selection import train_test_split
 
-ROOT = Path(__file__).resolve().parents[2]
-SRC_DIR = ROOT / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
-
-from venuspheno.models.classifier import GenomeClassifier
-from venuspheno.utils.metrics import compute_metrics
-from venuspheno.utils.dataset import GenomeBagDataset, collate_fn
-from venuspheno.utils.logger import get_logger, log_model_info, log_training_time
-from venuspheno.utils.early_stopping import EarlyStopping
+from models.classifier import GenomeClassifier
+from utils.metrics import compute_metrics
+from utils.dataset import GenomeBagDataset, collate_fn
+from utils.logger import get_logger, log_model_info, log_training_time
+from utils.earlystopping import EarlyStopping
 
 
 # =====================================================
@@ -25,13 +21,15 @@ from venuspheno.utils.early_stopping import EarlyStopping
 # =====================================================
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode", type=str, default="isab_pma",
-                    choices=["mean", "max", "attention", "pma", "isab_mean", "isab_pma"])
+                    choices=["mean", "max", "attention", "pma", "isab_mean", "isab_pma", "hsp"])
 parser.add_argument("--epochs", type=int, default=50)
 parser.add_argument("--batch_size", type=int, default=4)
 parser.add_argument("--lr", type=float, default=1e-4)
-parser.add_argument("--save_root", type=str, default="outputs")
+parser.add_argument("--save_root", type=str, default="Result")
 parser.add_argument("--metadata",  type=str, required=True)
 parser.add_argument("--train_txt", type=str, required=True)
+parser.add_argument("--val_txt", type=str, default=None,
+                    help="Optional fixed validation IDs. When supplied, no train/validation resplit is performed.")
 parser.add_argument("--test_txt",  type=str, required=True)
 parser.add_argument("--ckpt", type=str, default=None,
                     help="Path to trained model checkpoint (.pt)")
@@ -39,6 +37,37 @@ parser.add_argument("--attn_only", action="store_true",
                     help="Skip training and only extract attention")
 parser.add_argument("--extract_attn", action="store_true",
                     help="Extract PMA attention after training and save per-sample scores")
+parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--n_repeat", type=int, default=1)
+parser.add_argument("--ln", action="store_true",
+                    help="Enable LayerNorm inside Set Transformer aggregator blocks")
+parser.add_argument("--head_type", type=str, default="baseline",
+                    choices=["baseline", "norm_mlp", "res_mlp"])
+parser.add_argument("--input_proj", action="store_true",
+                    help="Enable pre-aggregator input projection")
+parser.add_argument("--seed_mab", action="store_true",
+                    help="Refine multi-seed PMA outputs with one seed-level SAB/MAB block")
+parser.add_argument("--optimizer", type=str, default="adam",
+                    choices=["adam", "adamw"])
+parser.add_argument("--weight_decay", type=float, default=0.0)
+parser.add_argument("--grad_clip_norm", type=float, default=0.0)
+parser.add_argument("--num_heads", type=int, default=2)
+parser.add_argument("--num_inds", type=int, default=32)
+parser.add_argument("--num_seeds", type=int, default=1)
+parser.add_argument("--hsp_out_tokens", type=int, default=4)
+parser.add_argument("--hsp_rank", type=int, default=4)
+parser.add_argument("--hidden_dim", type=int, default=256)
+parser.add_argument("--dropout", type=float, default=0.5)
+parser.add_argument("--seed_orth_lambda", type=float, default=0.0)
+parser.add_argument("--checkpoint_metric", type=str, default="auprc",
+                    choices=["auprc", "bacc"],
+                    help="Validation metric used for checkpoint selection; BAcc uses the fixed 0.5 logit threshold.")
+parser.add_argument("--decision_threshold", type=float, default=None,
+                    help="Fixed probability threshold for final binary metrics; omit to retain legacy validation-MCC tuning.")
+parser.add_argument("--amp", action="store_true",
+                    help="Use CUDA automatic mixed precision to reduce B32 attention-memory peaks.")
+parser.add_argument("--empty_cache_each_epoch", action="store_true",
+                    help="Release unused CUDA cache after validation and between repeat seeds.")
 args = parser.parse_args()
 
 
@@ -48,6 +77,7 @@ args = parser.parse_args()
 cfg = {
     "metadata":  args.metadata,
     "train_txt": args.train_txt,
+    "val_txt":   args.val_txt,
     "test_txt":  args.test_txt,
     "device": "cuda" if torch.cuda.is_available() else "cpu",
     "save_dir": args.save_root,
@@ -55,18 +85,30 @@ cfg = {
     # model
     "input_dim": 1024,
     "agg_mode": args.mode,
-    "num_heads": 2,
-    "num_inds": 32,
-    "num_seeds": 1,
-    "hidden_dim": 256,
-    "dropout": 0.5,
+    "num_heads": args.num_heads,
+    "num_inds": args.num_inds,
+    "num_seeds": args.num_seeds,
+    "hsp_out_tokens": args.hsp_out_tokens,
+    "hsp_rank": args.hsp_rank,
+    "hidden_dim": args.hidden_dim,
+    "dropout": args.dropout,
+    "seed_orth_lambda": args.seed_orth_lambda,
+    "ln": args.ln,
+    "head_type": args.head_type,
+    "input_proj": args.input_proj,
+    "seed_mab": args.seed_mab,
 
     # training
     "batch_size": args.batch_size,
     "epochs": args.epochs,
     "lr": args.lr,
-    "seed": 42,
-    "n_repeat": 1,
+    "seed": args.seed,
+    "n_repeat": args.n_repeat,
+    "optimizer": args.optimizer,
+    "weight_decay": args.weight_decay,
+    "grad_clip_norm": args.grad_clip_norm,
+    "amp": args.amp,
+    "empty_cache_each_epoch": args.empty_cache_each_epoch,
 }
 
 os.makedirs(cfg["save_dir"], exist_ok=True)
@@ -78,7 +120,7 @@ logger.info("Training started")
 # Utils
 # =====================================================
 from sklearn.metrics import precision_recall_curve, roc_auc_score, average_precision_score
-from sklearn.metrics import f1_score, matthews_corrcoef, balanced_accuracy_score
+from sklearn.metrics import f1_score, matthews_corrcoef, balanced_accuracy_score, accuracy_score
 
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
@@ -107,15 +149,25 @@ def find_best_threshold(y_true, y_prob, metric="f1"):
     return best_t, best_score
 
 
-def split_by_txt(meta_csv, train_txt, test_txt, val_ratio=0.2, seed=42):
+def seed_orth_loss(seed_emb):
+    if seed_emb is None or seed_emb.dim() != 3 or seed_emb.size(1) < 2:
+        return seed_emb.new_tensor(0.0) if seed_emb is not None else torch.tensor(0.0)
+    z = F.normalize(seed_emb, dim=-1)
+    gram = torch.bmm(z, z.transpose(1, 2))
+    eye = torch.eye(gram.size(1), device=gram.device, dtype=gram.dtype).unsqueeze(0)
+    return ((gram * (1.0 - eye)) ** 2).sum() / (gram.size(0) * gram.size(1) * (gram.size(1) - 1))
+
+
+def split_by_txt(meta_csv, train_txt, test_txt, val_txt=None, val_ratio=0.2, seed=42):
     df = pd.read_csv(meta_csv, dtype={"gcf": str})
     df["gcf"] = df["gcf"].str.strip()
 
-    with open(train_txt) as f:
-        train_ids = set(x.strip() for x in f)
+    def read_ids(path):
+        with open(path) as f:
+            return {line.strip() for line in f if line.strip()}
 
-    with open(test_txt) as f:
-        test_ids = set(x.strip() for x in f)
+    train_ids = read_ids(train_txt)
+    test_ids = read_ids(test_txt)
 
     print("Meta size:", len(df))
     print("Train IDs:", len(train_ids))
@@ -126,6 +178,18 @@ def split_by_txt(meta_csv, train_txt, test_txt, val_ratio=0.2, seed=42):
 
     if len(df_trainval) == 0:
         raise RuntimeError("No overlap between meta and train.txt IDs")
+
+    if val_txt is not None:
+        val_ids = read_ids(val_txt)
+        if train_ids & val_ids or train_ids & test_ids or val_ids & test_ids:
+            raise RuntimeError("train/val/test ID files overlap")
+        missing_ids = (train_ids | val_ids | test_ids) - set(df["gcf"])
+        if missing_ids:
+            raise RuntimeError(f"{len(missing_ids)} split IDs are absent from metadata")
+        df_val = df[df["gcf"].isin(val_ids)].reset_index(drop=True)
+        if df_val.empty or df_test.empty:
+            raise RuntimeError("Fixed validation or test split is empty")
+        return df_trainval, df_val, df_test
 
     stratify = None
     if df_trainval["label"].nunique() > 1:
@@ -283,13 +347,21 @@ start_time = time.time()
 
 for run in range(cfg["n_repeat"]):
     logger.info(f"\n========== Run {run+1}/{cfg['n_repeat']} ==========")
+    run_seed = cfg["seed"] + run
+    logger.info(f"Run seed: {run_seed}")
+
+    np.random.seed(run_seed)
+    torch.manual_seed(run_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(run_seed)
 
     # ---------- split ----------
     df_train, df_val, df_test = split_by_txt(
         cfg["metadata"],
         train_txt=cfg["train_txt"],
+        val_txt=cfg["val_txt"],
         test_txt=cfg["test_txt"],
-        seed=cfg["seed"] + run
+        seed=run_seed
     )
 
     train_dataset = GenomeBagDataset(df_train)
@@ -326,7 +398,13 @@ for run in range(cfg["n_repeat"]):
         num_seeds=cfg["num_seeds"],
         hidden_dim=cfg["hidden_dim"],
         dropout=cfg["dropout"],
-        num_classes=model_num_classes
+        num_classes=model_num_classes,
+        ln=cfg["ln"],
+        head_type=cfg["head_type"],
+        input_proj=cfg["input_proj"],
+        seed_mab=cfg["seed_mab"],
+        hsp_out_tokens=cfg["hsp_out_tokens"],
+        hsp_rank=cfg["hsp_rank"],
     ).to(cfg["device"])
     log_model_info(logger, model, device=cfg["device"])
 
@@ -347,11 +425,20 @@ for run in range(cfg["n_repeat"]):
     else:
         criterion = torch.nn.CrossEntropyLoss()
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
+    if cfg["optimizer"] == "adamw":
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=cfg["lr"],
+            weight_decay=cfg["weight_decay"],
+        )
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
+    use_amp = cfg["amp"] and cfg["device"] == "cuda"
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     if not args.attn_only:
         # ---------- training ----------
-        best_val_auprc = -1.0
+        best_val_score = -1.0
         best_state     = None
         early_stopper  = EarlyStopping(patience=10)
 
@@ -361,12 +448,21 @@ for run in range(cfg["n_repeat"]):
 
             for x, mask, y, _ in train_loader:
                 x, mask, y = x.to(cfg["device"]), mask.to(cfg["device"]), y.to(cfg["device"])
-                logits, _ = model(x, mask)
-
-                loss = criterion(logits, y.float() if is_binary else y.long())
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                with torch.cuda.amp.autocast(enabled=use_amp):
+                    if cfg["seed_orth_lambda"] > 0:
+                        logits, _, seed_emb = model(x, mask, return_seed_emb=True)
+                    else:
+                        logits, _ = model(x, mask)
+                    loss = criterion(logits, y.float() if is_binary else y.long())
+                    if cfg["seed_orth_lambda"] > 0:
+                        loss = loss + cfg["seed_orth_lambda"] * seed_orth_loss(seed_emb)
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                if cfg["grad_clip_norm"] > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip_norm"])
+                scaler.step(optimizer)
+                scaler.update()
                 total_loss += loss.item()
 
             logger.info(f"Epoch {epoch} | Train loss={total_loss / len(train_loader):.4f}")
@@ -375,7 +471,7 @@ for run in range(cfg["n_repeat"]):
             model.eval()
             y_true, y_logits = [], []
 
-            with torch.no_grad():
+            with torch.no_grad(), torch.cuda.amp.autocast(enabled=use_amp):
                 for x, mask, y, _ in val_loader:
                     x, mask = x.to(cfg["device"]), mask.to(cfg["device"])
                     logits, _ = model(x, mask)
@@ -387,13 +483,26 @@ for run in range(cfg["n_repeat"]):
 
             val_auprc = average_precision_score(y_true, y_prob)
             val_auroc = roc_auc_score(y_true, y_prob)
-            logger.info(f"Epoch {epoch} | Val AUROC={val_auroc:.4f} | Val AUPRC={val_auprc:.4f}")
+            val_bacc = balanced_accuracy_score(y_true, (y_prob >= 0.5).astype(int))
+            val_score = val_bacc if args.checkpoint_metric == "bacc" else val_auprc
+            logger.info(
+                f"Epoch {epoch} | Val AUROC={val_auroc:.4f} | Val AUPRC={val_auprc:.4f} "
+                f"| Val BAcc@0.5={val_bacc:.4f} | checkpoint_{args.checkpoint_metric}={val_score:.4f}"
+            )
 
-            if val_auprc > best_val_auprc:
-                best_val_auprc = val_auprc
+            if cfg["empty_cache_each_epoch"] and cfg["device"] == "cuda":
+                del x, mask, y, logits, loss
+                if cfg["seed_orth_lambda"] > 0:
+                    del seed_emb
+                gc.collect()
+                torch.cuda.empty_cache()
+                logger.info("Epoch %d | released unused CUDA cache", epoch)
+
+            if val_score > best_val_score:
+                best_val_score = val_score
                 best_state = model.state_dict()
 
-            if early_stopper.step(val_auprc):
+            if early_stopper.step(val_score):
                 logger.info("Early stopping triggered")
                 break
 
@@ -402,15 +511,17 @@ for run in range(cfg["n_repeat"]):
         ckpt_path = os.path.join(cfg["save_dir"], f"run{run+1}_best_model.pt")
         torch.save({
             "run":          run + 1,
+            "seed":         run_seed,
             "state_dict":   best_state,
-            "val_auprc":    best_val_auprc,
+            "checkpoint_metric": args.checkpoint_metric,
+            "best_val_score": best_val_score,
             "cfg":          cfg,
         }, ckpt_path)
         logger.info(f"[Checkpoint] Saved best model → {ckpt_path}")
 
         # ---------- find best threshold on validation ----------
         val_true, val_logits = [], []
-        with torch.no_grad():
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled=use_amp):
             for x, mask, y, _ in val_loader:
                 x, mask = x.to(cfg["device"]), mask.to(cfg["device"])
                 logits, _ = model(x, mask)
@@ -420,12 +531,16 @@ for run in range(cfg["n_repeat"]):
         val_true = np.array(val_true)
         val_prob = sigmoid(np.array(val_logits))
 
-        best_threshold, best_score = find_best_threshold(val_true, val_prob, metric="mcc")
-        logger.info(f"Best threshold on val: {best_threshold:.4f} | MCC={best_score:.4f}")
+        if args.decision_threshold is None:
+            best_threshold, best_score = find_best_threshold(val_true, val_prob, metric="mcc")
+            logger.info(f"Best threshold on val: {best_threshold:.4f} | MCC={best_score:.4f}")
+        else:
+            best_threshold = args.decision_threshold
+            logger.info(f"Fixed decision threshold: {best_threshold:.4f}")
 
         # ---------- test ----------
         y_true, y_logits = [], []
-        with torch.no_grad():
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled=use_amp):
             for x, mask, y, _ in test_loader:
                 x, mask = x.to(cfg["device"]), mask.to(cfg["device"])
                 logits, _ = model(x, mask)
@@ -442,6 +557,7 @@ for run in range(cfg["n_repeat"]):
             "F1":    f1_score(y_true, y_pred),
             "MCC":   matthews_corrcoef(y_true, y_pred),
             "BAcc":  balanced_accuracy_score(y_true, y_pred),
+            "ACC":   accuracy_score(y_true, y_pred),
         }
         all_test_metrics.append(test_metrics)
 
@@ -452,7 +568,7 @@ for run in range(cfg["n_repeat"]):
 
         np.save(os.path.join(cfg["save_dir"], f"run{run+1}_test_y_true.npy"), y_true)
         np.save(os.path.join(cfg["save_dir"], f"run{run+1}_test_y_pred.npy"), y_pred)
-    
+
     if args.attn_only:
 
         logger.info("Running attention extraction only")
@@ -483,6 +599,15 @@ for run in range(cfg["n_repeat"]):
                 model, split_loader, cfg["device"], cfg["agg_mode"]
             )
             save_attention_results(results, cfg["save_dir"], split_name, run + 1)
+
+    if not args.attn_only:
+        del best_state
+    del model, optimizer, criterion, scaler, train_loader, val_loader, test_loader
+    if cfg["empty_cache_each_epoch"] and cfg["device"] == "cuda":
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        logger.info("Run %d | released CUDA cache before next seed", run + 1)
 
 if len(all_test_metrics) == 0:
     logger.info("Attention-only mode: skip metric summary")
